@@ -227,10 +227,15 @@ impl Parser {
 
     fn parse_in_list(&mut self) -> Result<Vec<AstNode>> {
         self.expect(&TokenType::LParen)?;
-        let mut items = vec![self.parse_logical()?];
+        let mut items = Vec::new();
+        if self.peek_type() == Some(&TokenType::RParen) {
+            self.advance();
+            return Ok(items);
+        }
+        items.push(self.parse_primary()?);
         while self.peek_type() == Some(&TokenType::Comma) {
             self.advance();
-            items.push(self.parse_logical()?);
+            items.push(self.parse_primary()?);
         }
         self.expect(&TokenType::RParen)?;
         Ok(items)
@@ -284,6 +289,13 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<AstNode> {
         match self.peek_type().cloned() {
+            Some(TokenType::Minus) => {
+                self.advance();
+                let operand = self.parse_primary()?;
+                Ok(AstNode::UnaryOp {
+                    operand: Box::new(operand),
+                })
+            }
             Some(TokenType::Number) => {
                 let tok = self.advance().unwrap();
                 let d = Decimal::from_str(&tok.text)
@@ -324,6 +336,8 @@ impl Parser {
                 | TokenType::FnCoalesce
                 | TokenType::FnAbs
                 | TokenType::FnConcat
+                | TokenType::FnLeast
+                | TokenType::FnGreatest
                 | TokenType::FnEvent,
             ) => self.parse_function_call(),
             Some(ty) => Err(DsqlexError(format!("Unexpected token: {:?}", ty))),
@@ -371,6 +385,8 @@ impl Parser {
             TokenType::FnCoalesce => "COALESCE".into(),
             TokenType::FnAbs => "ABS".into(),
             TokenType::FnConcat => "CONCAT".into(),
+            TokenType::FnLeast => "LEAST".into(),
+            TokenType::FnGreatest => "GREATEST".into(),
             TokenType::FnEvent => "EVENT".into(),
             _ => unreachable!(),
         };

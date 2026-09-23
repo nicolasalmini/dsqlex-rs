@@ -24,6 +24,8 @@ fn keyword_lookup(word: &str) -> Option<TokenType> {
         "COALESCE" | "NVL" => Some(TokenType::FnCoalesce),
         "ABS" => Some(TokenType::FnAbs),
         "CONCAT" => Some(TokenType::FnConcat),
+        "LEAST" => Some(TokenType::FnLeast),
+        "GREATEST" => Some(TokenType::FnGreatest),
         "EVENT" => Some(TokenType::FnEvent),
         _ => None,
     }
@@ -125,6 +127,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
             while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                i += 1;
+            }
+            if i < len && chars[i] == '?' {
                 i += 1;
             }
             let text: String = chars[start..i].iter().collect();

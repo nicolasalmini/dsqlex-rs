@@ -36,6 +36,9 @@ pub enum AstNode {
         left: Box<AstNode>,
         right: Box<AstNode>,
     },
+    UnaryOp {
+        operand: Box<AstNode>,
+    },
     CaseExpr {
         whens: Vec<WhenClause>,
         else_clause: Option<Box<AstNode>>,

@@ -129,3 +129,54 @@ fn is_in_like_keywords() {
     assert_eq!(tokens[2].ty, TokenType::Like);
     assert_eq!(tokens[3].ty, TokenType::Not);
 }
+
+#[test]
+fn least_greatest_tokens() {
+    let tokens = tokenize("LEAST GREATEST least Greatest").unwrap();
+    let types: Vec<_> = tokens.iter().map(|t| &t.ty).collect();
+    assert_eq!(
+        types,
+        vec![
+            &TokenType::FnLeast,
+            &TokenType::FnGreatest,
+            &TokenType::FnLeast,
+            &TokenType::FnGreatest,
+        ]
+    );
+}
+
+#[test]
+fn trailing_question_mark_identifier() {
+    let tokens = tokenize("active?").unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].ty, TokenType::Identifier);
+    assert_eq!(tokens[0].text, "active?");
+}
+
+#[test]
+fn trailing_question_mark_dotted_identifier() {
+    let tokens = tokenize("user.active?").unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].ty, TokenType::Identifier);
+    assert_eq!(tokens[0].text, "user.active?");
+}
+
+#[test]
+fn question_mark_does_not_classify_as_keyword() {
+    let tokens = tokenize("select?").unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].ty, TokenType::Identifier);
+    assert_eq!(tokens[0].text, "select?");
+}
+
+#[test]
+fn double_question_mark_rejected() {
+    assert!(tokenize("a??").is_err());
+}
+
+#[test]
+fn minus_token_unchanged() {
+    let tokens = tokenize("a - b").unwrap();
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[1].ty, TokenType::Minus);
+}

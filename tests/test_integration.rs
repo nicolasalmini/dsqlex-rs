@@ -1,6 +1,8 @@
-use dsqlex::evaluator::{Context, Value};
+use dsqlex::evaluator::{Context, EvalOptions, Value};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
+use std::collections::HashSet;
+use std::rc::Rc;
 
 fn dec(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
@@ -212,4 +214,194 @@ fn short_circuit_or() {
     ctx.set_bool("flag", true);
     let r = dsqlex::eval_string("flag OR (1 / 0 > 0)", &ctx);
     assert_eq!(r.unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn unary_minus_end_to_end() {
+    let mut ctx = Context::new();
+    ctx.set_decimal("price", "500.00");
+    ctx.set_null("bonus");
+
+    assert_eq!(
+        dsqlex::eval_string("SELECT -2.5", &ctx).unwrap(),
+        Value::Decimal(dec("-2.5"))
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT -price", &ctx).unwrap(),
+        Value::Decimal(dec("-500.00"))
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT price * -1", &ctx).unwrap(),
+        Value::Decimal(dec("-500.00"))
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT 5 - - 2", &ctx).unwrap(),
+        Value::Decimal(dec("7"))
+    );
+
+    let mut ctx2 = Context::new();
+    ctx2.set_decimal("balance", "-42");
+    assert_eq!(
+        dsqlex::eval_string("balance IN (-42, 0)", &ctx2).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        dsqlex::eval_string("balance IN (-41, 0)", &ctx2).unwrap(),
+        Value::Bool(false)
+    );
+
+    assert_eq!(
+        dsqlex::eval_string("SELECT -bonus", &ctx).unwrap(),
+        Value::Null
+    );
+}
+
+#[test]
+fn least_greatest_null_end_to_end() {
+    let mut ctx = Context::new();
+    ctx.set_decimal("price", "500.00");
+    ctx.set_decimal("quantity", "100.00");
+    ctx.set_decimal("rate", "5.00");
+    ctx.set_null("bonus");
+
+    assert_eq!(
+        dsqlex::eval_string("SELECT LEAST(price, quantity, rate)", &ctx).unwrap(),
+        Value::Decimal(dec("5.00"))
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT GREATEST(price, quantity, rate)", &ctx).unwrap(),
+        Value::Decimal(dec("500.00"))
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT LEAST(price, bonus)", &ctx).unwrap(),
+        Value::Null
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT bonus + 1", &ctx).unwrap(),
+        Value::Null
+    );
+    assert_eq!(
+        dsqlex::eval_string("SELECT price * bonus", &ctx).unwrap(),
+        Value::Null
+    );
+
+    let mut ctx3 = Context::new();
+    ctx3.set_bool("eligible?", true);
+    assert_eq!(
+        dsqlex::eval_string("SELECT eligible?", &ctx3).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn event_two_arg() {
+    let mut ctx = Context::new();
+    ctx.set_decimal("amt", "10");
+    let opts = EvalOptions {
+        event_resolver: Some(Box::new(|_t: &str, _s: &str, c: &Context, visited: &HashSet<Rc<str>>| {
+            let inner = EvalOptions {
+                visited: visited.clone(),
+                ..Default::default()
+            };
+            dsqlex::eval_string_with_options("amt * 2", c, &inner)
+        })),
+        ..Default::default()
+    };
+    assert_eq!(
+        dsqlex::eval_string_with_options("EVENT(a, b)", &ctx, &opts).unwrap(),
+        Value::Decimal(dec("20"))
+    );
+}
+
+#[test]
+fn event_nested_source() {
+    let mut ctx = Context::new();
+    let mut sub = Context::new();
+    sub.set_decimal("amt", "5");
+    ctx.set_nested("sub", sub);
+    let opts = EvalOptions {
+        event_resolver: Some(Box::new(|_t: &str, _s: &str, c: &Context, visited: &HashSet<Rc<str>>| {
+            let inner = EvalOptions {
+                visited: visited.clone(),
+                ..Default::default()
+            };
+            dsqlex::eval_string_with_options("amt * 2", c, &inner)
+        })),
+        ..Default::default()
+    };
+    assert_eq!(
+        dsqlex::eval_string_with_options("EVENT(a, b, sub)", &ctx, &opts).unwrap(),
+        Value::Decimal(dec("10"))
+    );
+}
+
+#[test]
+fn event_list_source_sums() {
+    let mut ctx = Context::new();
+    let mut i1 = Context::new();
+    i1.set_decimal("amt", "3");
+    let mut i2 = Context::new();
+    i2.set_decimal("amt", "4");
+    ctx.set_list("items", vec![i1, i2]);
+    let opts = EvalOptions {
+        event_resolver: Some(Box::new(|_t: &str, _s: &str, c: &Context, visited: &HashSet<Rc<str>>| {
+            let inner = EvalOptions {
+                visited: visited.clone(),
+                ..Default::default()
+            };
+            dsqlex::eval_string_with_options("amt * 2", c, &inner)
+        })),
+        ..Default::default()
+    };
+    assert_eq!(
+        dsqlex::eval_string_with_options("EVENT(a, b, items)", &ctx, &opts).unwrap(),
+        Value::Decimal(dec("14"))
+    );
+
+    let mut empty = Context::new();
+    empty.set_list("items", vec![]);
+    assert_eq!(
+        dsqlex::eval_string_with_options("EVENT(a, b, items)", &empty, &opts).unwrap(),
+        Value::Decimal(dec("0"))
+    );
+}
+
+#[test]
+fn event_errors() {
+    let mut ctx = Context::new();
+    ctx.set_decimal("amt", "10");
+    let opts = EvalOptions {
+        event_resolver: Some(Box::new(|_t: &str, _s: &str, _c: &Context, _v: &HashSet<Rc<str>>| {
+            Ok(Value::Decimal(dec("1")))
+        })),
+        ..Default::default()
+    };
+    assert!(dsqlex::eval_string_with_options("EVENT(a, b, missing)", &ctx, &opts).is_err());
+    assert!(dsqlex::eval_string_with_options("EVENT(a, b, amt)", &ctx, &opts).is_err());
+    assert!(dsqlex::eval_string_with_options("EVENT('a', 'b')", &ctx, &opts).is_err());
+    assert!(dsqlex::eval_string_with_options("EVENT(a)", &ctx, &opts).is_err());
+    assert!(dsqlex::eval_string_with_options("EVENT(a, b)", &ctx, &EvalOptions::default()).is_err());
+}
+
+#[test]
+fn event_circular() {
+    let mut ctx = Context::new();
+    ctx.set_decimal("amt", "10");
+    let opts = EvalOptions {
+        event_resolver: Some(Box::new(|_t: &str, _s: &str, c: &Context, visited: &HashSet<Rc<str>>| {
+            dsqlex::eval_string_with_options(
+                "EVENT(a, b)",
+                c,
+                &EvalOptions {
+                    event_resolver: Some(Box::new(
+                        |_: &str, _: &str, _: &Context, _: &HashSet<Rc<str>>| Ok(Value::Null),
+                    )),
+                    visited: visited.clone(),
+                    ..Default::default()
+                },
+            )
+        })),
+        ..Default::default()
+    };
+    assert!(dsqlex::eval_string_with_options("EVENT(a, b)", &ctx, &opts).is_err());
 }
