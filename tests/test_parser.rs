@@ -132,3 +132,148 @@ fn empty_expression_is_error() {
 fn trailing_tokens_is_error() {
     assert!(dsqlex::parse("a b").is_err());
 }
+
+#[test]
+fn unary_minus_literal() {
+    let ast = dsqlex::parse("SELECT -1").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::UnaryOp { ref operand } => {
+                assert!(matches!(**operand, AstNode::NumberLit(_)));
+            }
+            _ => panic!("Expected UnaryOp"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn unary_minus_right_of_multiply() {
+    let ast = dsqlex::parse("SELECT amount * -1").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::BinaryOp {
+                ref op, ref right, ..
+            } => {
+                assert_eq!(*op, BinOp::Multiply);
+                assert!(matches!(**right, AstNode::UnaryOp { .. }));
+            }
+            _ => panic!("Expected BinaryOp"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn unary_minus_parenthesized() {
+    let ast = dsqlex::parse("SELECT -(1 + 2)").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::UnaryOp { ref operand } => {
+                assert!(matches!(
+                    **operand,
+                    AstNode::BinaryOp {
+                        op: BinOp::Plus,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected UnaryOp"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn subtraction_of_negated_operand() {
+    let ast = dsqlex::parse("SELECT 5 - - 2").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::BinaryOp {
+                ref op, ref right, ..
+            } => {
+                assert_eq!(*op, BinOp::Minus);
+                assert!(matches!(**right, AstNode::UnaryOp { .. }));
+            }
+            _ => panic!("Expected BinaryOp"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn nested_unary_minus() {
+    let ast = dsqlex::parse("SELECT - -5").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::UnaryOp { ref operand } => {
+                assert!(matches!(**operand, AstNode::UnaryOp { .. }));
+            }
+            _ => panic!("Expected UnaryOp"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn double_dash_is_comment() {
+    assert!(dsqlex::parse("SELECT --5").is_err());
+}
+
+#[test]
+fn unary_minus_in_in_list() {
+    let ast = dsqlex::parse("x IN (1, -2)").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::InExpr { ref items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[1], AstNode::UnaryOp { .. }));
+            }
+            _ => panic!("Expected InExpr"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn empty_in_list() {
+    let ast = dsqlex::parse("x IN ()").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::InExpr { ref items, .. } => assert!(items.is_empty()),
+            _ => panic!("Expected InExpr"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}
+
+#[test]
+fn mixed_arithmetic_with_negated_operand_rejected() {
+    assert!(dsqlex::parse("SELECT 1 + 2 * -3").is_err());
+}
+
+#[test]
+fn least_greatest_calls() {
+    let ast = dsqlex::parse("LEAST(a, 1, 2)").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::FunctionCall { ref name, ref args } => {
+                assert_eq!(name.as_ref(), "LEAST");
+                assert_eq!(args.len(), 3);
+            }
+            _ => panic!("Expected FunctionCall"),
+        },
+        _ => panic!("Expected Select"),
+    }
+    let ast = dsqlex::parse("GREATEST(x, y)").unwrap();
+    match ast {
+        AstNode::Select(inner) => match *inner {
+            AstNode::FunctionCall { ref name, ref args } => {
+                assert_eq!(name.as_ref(), "GREATEST");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected FunctionCall"),
+        },
+        _ => panic!("Expected Select"),
+    }
+}

@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 rust_decimal = "1"
 regex = "1"
+chrono = { version = "=0.4.38", default-features = false, features = ["std"] }

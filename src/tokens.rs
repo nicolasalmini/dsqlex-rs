@@ -35,6 +35,8 @@ pub enum TokenType {
     FnCoalesce,
     FnAbs,
     FnConcat,
+    FnLeast,
+    FnGreatest,
     FnEvent,
     // Literals & identifiers
     Number,

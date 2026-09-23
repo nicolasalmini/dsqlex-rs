@@ -1,5 +1,6 @@
 use crate::ast::{AstNode, BinOp};
 use crate::{DsqlexError, Result};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use regex::Regex;
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
@@ -12,6 +13,12 @@ pub enum Value {
     String(Rc<str>),
     Bool(bool),
     Null,
+    Date(NaiveDate),
+    DateTime(DateTime<Utc>),
+    NaiveDateTime(NaiveDateTime),
+    Time(NaiveTime),
+    List(Vec<Value>),
+    Map(Box<Context>),
 }
 
 impl Value {
@@ -37,14 +44,25 @@ impl std::fmt::Display for Value {
             Value::String(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", if *b { "TRUE" } else { "FALSE" }),
             Value::Null => write!(f, "NULL"),
+            Value::Date(d) => write!(f, "{}", d),
+            Value::DateTime(d) => write!(f, "{}", d.to_rfc3339()),
+            Value::NaiveDateTime(d) => write!(f, "{}", d),
+            Value::Time(t) => write!(f, "{}", t),
+            Value::List(items) => {
+                let parts: Vec<std::string::String> =
+                    items.iter().map(|v| v.to_string()).collect();
+                write!(f, "{}", parts.join(","))
+            }
+            Value::Map(_) => write!(f, ""),
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Context {
     pub fields: HashMap<Rc<str>, Value>,
     pub nested: HashMap<Rc<str>, Context>,
+    pub lists: HashMap<Rc<str>, Vec<Context>>,
 }
 
 impl Context {
@@ -77,6 +95,26 @@ impl Context {
 
     pub fn set_nested(&mut self, key: impl Into<Rc<str>>, ctx: Context) {
         self.nested.insert(key.into(), ctx);
+    }
+
+    pub fn set_list(&mut self, key: impl Into<Rc<str>>, items: Vec<Context>) {
+        self.lists.insert(key.into(), items);
+    }
+
+    pub fn set_date(&mut self, key: impl Into<Rc<str>>, val: NaiveDate) {
+        self.fields.insert(key.into(), Value::Date(val));
+    }
+
+    pub fn set_datetime(&mut self, key: impl Into<Rc<str>>, val: DateTime<Utc>) {
+        self.fields.insert(key.into(), Value::DateTime(val));
+    }
+
+    pub fn set_naive_datetime(&mut self, key: impl Into<Rc<str>>, val: NaiveDateTime) {
+        self.fields.insert(key.into(), Value::NaiveDateTime(val));
+    }
+
+    pub fn set_time(&mut self, key: impl Into<Rc<str>>, val: NaiveTime) {
+        self.fields.insert(key.into(), Value::Time(val));
     }
 }
 
@@ -115,6 +153,9 @@ fn value_to_decimal(v: &Value) -> Result<Decimal> {
             .map_err(|_| DsqlexError(format!("Cannot convert '{}' to decimal", s))),
         Value::Bool(_) => Err(DsqlexError("Cannot convert boolean to decimal".into())),
         Value::Null => Err(DsqlexError("Cannot convert NULL to decimal".into())),
+        Value::List(_) => Err(DsqlexError("Cannot convert list to decimal".into())),
+        Value::Map(_) => Err(DsqlexError("Cannot convert map to decimal".into())),
+        _ => Err(DsqlexError("Cannot convert value to decimal".into())),
     }
 }
 
@@ -124,6 +165,7 @@ fn val_to_string(v: &Value) -> std::string::String {
         Value::String(s) => s.to_string(),
         Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Null => "NULL".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -138,21 +180,31 @@ fn compare_values(lhs: &Value, rhs: &Value) -> i32 {
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
         },
-        (Value::String(a), Value::String(b)) => {
-            // Try decimal conversion for numeric strings
-            if let (Ok(da), Ok(db)) = (Decimal::from_str(a), Decimal::from_str(b)) {
-                return match da.cmp(&db) {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                };
-            }
-            match a.as_ref().cmp(b.as_ref()) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            }
-        }
+        (Value::String(a), Value::String(b)) => match a.as_ref().cmp(b.as_ref()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+        (Value::Date(a), Value::Date(b)) => match a.cmp(b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+        (Value::DateTime(a), Value::DateTime(b)) => match a.cmp(b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+        (Value::NaiveDateTime(a), Value::NaiveDateTime(b)) => match a.cmp(b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+        (Value::Time(a), Value::Time(b)) => match a.cmp(b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
         (Value::Bool(a), Value::Bool(b)) => match (*a as u8).cmp(&(*b as u8)) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
@@ -224,20 +276,107 @@ fn resolve_identifier(name: &str, ctx: &Context, opts: &EvalOptions) -> Result<V
     }
 
     // Dot-path resolution
-    if let Some(dot_pos) = name.find('.') {
-        let (first, rest) = name.split_at(dot_pos);
-        let rest = &rest[1..]; // skip the dot
-        if let Some(nested) = ctx.nested.get(first) {
-            return resolve_identifier(rest, nested, opts);
-        }
+    if name.contains('.') {
+        let parts: Vec<&str> = name.split('.').collect();
+        return resolve_dot_path(&parts, PathAcc::Context(ctx), name, opts);
+    }
+
+    if let Some(nested) = ctx.nested.get(name) {
+        return Ok(Value::Map(Box::new(nested.clone())));
+    }
+    if let Some(list) = ctx.lists.get(name) {
+        return Ok(Value::List(
+            list.iter()
+                .map(|item| Value::Map(Box::new(item.clone())))
+                .collect(),
+        ));
     }
 
     // Custom resolver
     if let Some(ref resolver) = opts.resolver {
+        let key: Rc<str> = name.into();
+        if opts.visited.contains(&key) {
+            return Err(DsqlexError(format!(
+                "Circular reference detected: {}",
+                name
+            )));
+        }
         return resolver(name, &opts.visited);
     }
 
     Err(DsqlexError(format!("Unknown field: {}", name)))
+}
+
+enum PathAcc<'a> {
+    Context(&'a Context),
+    Value(&'a Value),
+    List(&'a [Context]),
+}
+
+fn is_decimal_like(v: &Value) -> bool {
+    match v {
+        Value::Decimal(_) => true,
+        Value::String(s) => Decimal::from_str(s).is_ok(),
+        _ => false,
+    }
+}
+
+fn resolve_dot_path(
+    parts: &[&str],
+    acc: PathAcc<'_>,
+    path: &str,
+    opts: &EvalOptions,
+) -> Result<Value> {
+    if parts.is_empty() {
+        return match acc {
+            PathAcc::Value(v) => Ok(v.clone()),
+            PathAcc::Context(c) => Ok(Value::Map(Box::new(c.clone()))),
+            PathAcc::List(items) => Ok(Value::List(
+                items
+                    .iter()
+                    .map(|item| Value::Map(Box::new(item.clone())))
+                    .collect(),
+            )),
+        };
+    }
+
+    if let PathAcc::List(items) = acc {
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            results.push(resolve_dot_path(parts, PathAcc::Context(item), path, opts)?);
+        }
+        if results.iter().all(is_decimal_like) {
+            let mut sum = Decimal::ZERO;
+            for r in &results {
+                sum += value_to_decimal(r)?;
+            }
+            return Ok(Value::Decimal(sum));
+        }
+        return Ok(Value::List(results));
+    }
+
+    match acc {
+        PathAcc::Context(c) => {
+            let key = parts[0];
+            if let Some(v) = c.fields.get(key) {
+                return resolve_dot_path(&parts[1..], PathAcc::Value(v), path, opts);
+            }
+            if let Some(nested) = c.nested.get(key) {
+                return resolve_dot_path(&parts[1..], PathAcc::Context(nested), path, opts);
+            }
+            if let Some(list) = c.lists.get(key) {
+                return resolve_dot_path(&parts[1..], PathAcc::List(list), path, opts);
+            }
+            Err(DsqlexError(format!(
+                "Unknown field: {} (failed at '{}')",
+                path, key
+            )))
+        }
+        _ => Err(DsqlexError(format!(
+            "Cannot access '{}' on non-map value in path '{}'",
+            parts[0], path
+        ))),
+    }
 }
 
 // ── main evaluate ──
@@ -255,6 +394,15 @@ pub fn evaluate(ast: &AstNode, ctx: &Context, opts: &EvalOptions) -> Result<Valu
         AstNode::Identifier(name) => resolve_identifier(name, ctx, opts),
 
         AstNode::BinaryOp { op, left, right } => eval_binop(op, left, right, ctx, opts),
+
+        AstNode::UnaryOp { operand } => {
+            let val = evaluate(operand, ctx, opts)?;
+            if matches!(&val, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let d = value_to_decimal(&val)?;
+            Ok(Value::Decimal(-d))
+        }
 
         AstNode::CaseExpr { whens, else_clause } => {
             for wc in whens {
@@ -350,6 +498,9 @@ fn eval_binop(
 
     match op {
         BinOp::Plus | BinOp::Minus | BinOp::Multiply | BinOp::Divide => {
+            if matches!(&lv, Value::Null) || matches!(&rv, Value::Null) {
+                return Ok(Value::Null);
+            }
             let ld = value_to_decimal(&lv)?;
             let rd = value_to_decimal(&rv)?;
             let result = match op {
@@ -407,11 +558,11 @@ fn eval_function(
                 return Err(DsqlexError("ROUND requires exactly 2 arguments".into()));
             }
             let val = evaluate(&args[0], ctx, opts)?;
-            if matches!(&val, Value::Null) {
+            let prec_val = evaluate(&args[1], ctx, opts)?;
+            if matches!(&val, Value::Null) || matches!(&prec_val, Value::Null) {
                 return Ok(Value::Null);
             }
             let d = value_to_decimal(&val)?;
-            let prec_val = evaluate(&args[1], ctx, opts)?;
             let prec = value_to_decimal(&prec_val)?
                 .to_i32()
                 .ok_or_else(|| DsqlexError("ROUND precision must be an integer".into()))?;
@@ -478,49 +629,97 @@ fn eval_function(
             }
             Ok(Value::String(result.into()))
         }
-        "EVENT" => {
-            if args.len() < 2 || args.len() > 3 {
-                return Err(DsqlexError("EVENT requires 2 or 3 arguments".into()));
+        "LEAST" | "GREATEST" => {
+            if args.is_empty() {
+                return Err(DsqlexError(
+                    "LEAST/GREATEST requires at least one argument".into(),
+                ));
             }
-            let type_val = evaluate(&args[0], ctx, opts)?;
-            let subtype_val = evaluate(&args[1], ctx, opts)?;
-            let type_str = val_to_string(&type_val);
-            let subtype_str = val_to_string(&subtype_val);
-
-            let event_resolver = opts
-                .event_resolver
-                .as_ref()
-                .ok_or_else(|| DsqlexError("No event_resolver provided".into()))?;
-
-            let key: Rc<str> = format!("{}.{}", type_str, subtype_str).into();
-            if opts.visited.contains(&key) {
+            let mut vals = Vec::with_capacity(args.len());
+            let mut has_null = false;
+            for arg in args {
+                let v = evaluate(arg, ctx, opts)?;
+                if matches!(&v, Value::Null) {
+                    has_null = true;
+                }
+                vals.push(v);
+            }
+            if has_null {
+                return Ok(Value::Null);
+            }
+            let target = if name == "LEAST" { -1 } else { 1 };
+            let mut best = vals[0].clone();
+            for v in &vals[1..] {
+                if compare_values(v, &best) == target {
+                    best = v.clone();
+                }
+            }
+            Ok(best)
+        }
+        "EVENT" => {
+            let valid = (args.len() == 2 || args.len() == 3)
+                && args.iter().all(|a| matches!(a, AstNode::Identifier(_)));
+            if !valid {
+                return Err(DsqlexError(
+                    "EVENT requires 2 or 3 arguments: EVENT(type, subtype) or EVENT(type, subtype, context_source)".into(),
+                ));
+            }
+            let (type_str, subtype_str) = match (&args[0], &args[1]) {
+                (AstNode::Identifier(t), AstNode::Identifier(s)) => (t.as_ref(), s.as_ref()),
+                _ => unreachable!(),
+            };
+            if args.len() == 2 {
+                return resolve_event(type_str, subtype_str, ctx, opts);
+            }
+            let source = match &args[2] {
+                AstNode::Identifier(s) => s.as_ref(),
+                _ => unreachable!(),
+            };
+            if let Some(list) = ctx.lists.get(source) {
+                let mut sum = Decimal::ZERO;
+                for item in list {
+                    let v = resolve_event(type_str, subtype_str, item, opts)?;
+                    sum += value_to_decimal(&v)?;
+                }
+                return Ok(Value::Decimal(sum));
+            }
+            if let Some(nested) = ctx.nested.get(source) {
+                return resolve_event(type_str, subtype_str, nested, opts);
+            }
+            if ctx.fields.contains_key(source) {
                 return Err(DsqlexError(format!(
-                    "Circular reference detected: {}",
-                    key
+                    "EVENT context source '{}' must be a map or list of maps",
+                    source
                 )));
             }
-
-            let eval_ctx = if args.len() == 3 {
-                let source_name = match &args[2] {
-                    AstNode::Identifier(name) => name.as_ref(),
-                    _ => {
-                        return Err(DsqlexError(
-                            "EVENT third argument must be an identifier".into(),
-                        ))
-                    }
-                };
-                ctx.nested
-                    .get(source_name)
-                    .ok_or_else(|| {
-                        DsqlexError(format!("Nested context '{}' not found", source_name))
-                    })?
-                    .clone()
-            } else {
-                ctx.clone()
-            };
-
-            event_resolver(&type_str, &subtype_str, &eval_ctx, &opts.visited)
+            Err(DsqlexError(format!(
+                "EVENT context source '{}' not found in context",
+                source
+            )))
         }
         _ => Err(DsqlexError(format!("Unknown function: {}", name))),
     }
+}
+
+fn resolve_event(
+    type_str: &str,
+    subtype_str: &str,
+    ctx: &Context,
+    opts: &EvalOptions,
+) -> Result<Value> {
+    let event_resolver = opts
+        .event_resolver
+        .as_ref()
+        .ok_or_else(|| DsqlexError("EVENT() calls require an :event_resolver option".into()))?;
+
+    let key: Rc<str> = format!("{}.{}", type_str, subtype_str).into();
+    if opts.visited.contains(&key) {
+        return Err(DsqlexError(format!(
+            "Circular reference detected: {}",
+            key
+        )));
+    }
+    let mut visited = opts.visited.clone();
+    visited.insert(key);
+    event_resolver(type_str, subtype_str, ctx, &visited)
 }
